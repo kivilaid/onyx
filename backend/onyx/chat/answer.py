@@ -11,6 +11,7 @@ from onyx.agents.agent_search.models import GraphSearchConfig
 from onyx.agents.agent_search.models import GraphTooling
 from onyx.agents.agent_search.run_graph import run_basic_graph
 from onyx.agents.agent_search.run_graph import run_dc_graph
+from onyx.agents.agent_search.run_graph import run_kb_graph
 from onyx.agents.agent_search.run_graph import run_main_graph
 from onyx.chat.models import AgentAnswerPiece
 from onyx.chat.models import AnswerPacket
@@ -152,6 +153,13 @@ class Answer:
             )
         ):
             run_langgraph = run_dc_graph
+        elif (
+            self.graph_config.inputs.search_request.persona
+            and self.graph_config.inputs.search_request.persona.name.startswith(
+                "KG Dev"
+            )
+        ):
+            run_langgraph = run_kb_graph
         else:
             run_langgraph = run_basic_graph
 
