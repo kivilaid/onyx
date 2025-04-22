@@ -116,6 +116,7 @@ class BaseFilters(BaseModel):
     kg_entities: list[str] | None = None
     kg_relationships: list[str] | None = None
     kg_terms: list[str] | None = None
+    kg_sources: list[str] | None = None
 
 
 class IndexFilters(BaseFilters):
