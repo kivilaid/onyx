@@ -187,7 +187,7 @@ class TeamsConnector(LoadConnector, PollConnector):
         self.requested_team_list: list[str] = teams
         self.msal_app: msal.ConfidentialClientApplication | None = None
 
-    def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
+    def load_credentials(self, credentials: dict[str, Any]):
         teams_client_id = credentials["teams_client_id"]
         teams_client_secret = credentials["teams_client_secret"]
         teams_directory_id = credentials["teams_directory_id"]
@@ -212,30 +212,25 @@ class TeamsConnector(LoadConnector, PollConnector):
             return token
 
         self.graph_client = GraphClient(_acquire_token_func)
-        return None
 
     def _get_all_teams(self) -> list[Team]:
         if self.graph_client is None:
             raise ConnectorMissingCredentialError("Teams")
 
-        teams_list: list[Team] = []
-
         teams = self.graph_client.teams.get().execute_query_retry()
 
-        if len(self.requested_team_list) > 0:
-            adjusted_request_strings = [
-                requested_team.replace(" ", "")
-                for requested_team in self.requested_team_list
-            ]
-            teams_list = [
-                team
-                for team in teams
-                if team.display_name.replace(" ", "") in adjusted_request_strings
-            ]
-        else:
-            teams_list.extend(teams)
+        if len(self.requested_team_list) == 0:
+            return list(teams)
 
-        return teams_list
+        adjusted_request_strings = [
+            requested_team.replace(" ", "")
+            for requested_team in self.requested_team_list
+        ]
+        return [
+            team
+            for team in teams
+            if team.display_name.replace(" ", "") in adjusted_request_strings
+        ]
 
     def _fetch_from_teams(
         self, start: datetime | None = None, end: datetime | None = None
