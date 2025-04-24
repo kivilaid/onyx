@@ -102,6 +102,8 @@ from onyx.file_store.utils import load_in_memory_chat_files
 from onyx.file_store.utils import save_files
 from onyx.kg.clustering.clustering import kg_clustering
 from onyx.kg.extractions.extraction_processing import kg_extraction
+from onyx.kg.resets.reset_extractions import reset_extraction_kg_index
+from onyx.kg.resets.reset_index import reset_full_kg_index
 from onyx.llm.exceptions import GenAIDisabledException
 from onyx.llm.factory import get_llms_for_persona
 from onyx.llm.factory import get_main_llm_from_tuple
@@ -668,6 +670,8 @@ def stream_chat_message_objects(
 
     index_str = "danswer_chunk_text_embedding_3_small"
 
+    # TODO: INITIAL DEV ONLY!!!
+
     if new_msg_req.message == "ee":
         kg_extraction(tenant_id, index_str)
 
@@ -676,6 +680,14 @@ def stream_chat_message_objects(
     elif new_msg_req.message == "cc":
         kg_clustering(tenant_id, index_str)
         raise Exception("Clustering done")
+
+    elif new_msg_req.message == "reset_full_kg_index":
+        reset_full_kg_index()
+        raise Exception("Full KG index reset done")
+
+    elif new_msg_req.message == "reset_extraction_kg_index":
+        reset_extraction_kg_index()
+        raise Exception("Extraction KG index reset done")
 
     try:
         # Move these variables inside the try block
