@@ -23,7 +23,9 @@ from onyx.chat.models import StreamStopInfo
 from onyx.chat.models import StreamStopReason
 from onyx.chat.models import SubQuestionKey
 from onyx.chat.prompt_builder.answer_prompt_builder import AnswerPromptBuilder
+from onyx.configs.chat_configs import USE_DIV_CON_AGENT
 from onyx.configs.constants import BASIC_KEY
+from onyx.configs.kg_configs import USE_KG_APPROACH
 from onyx.context.search.models import SearchRequest
 from onyx.file_store.utils import InMemoryChatFile
 from onyx.llm.interfaces import LLM
@@ -148,6 +150,7 @@ class Answer:
             run_langgraph = run_main_graph
         elif (
             self.graph_config.inputs.search_request.persona
+            and USE_DIV_CON_AGENT
             and self.graph_config.inputs.search_request.persona.description.startswith(
                 "DivCon Beta Agent"
             )
@@ -155,6 +158,7 @@ class Answer:
             run_langgraph = run_dc_graph
         elif (
             self.graph_config.inputs.search_request.persona
+            and USE_KG_APPROACH
             and self.graph_config.inputs.search_request.persona.name.startswith(
                 "KG Dev"
             )
