@@ -56,7 +56,7 @@ import {
   SwapIcon,
   TrashIcon,
 } from "@/components/icons/icons";
-import { buildImgUrl } from "@/app/chat/files/images/utils";
+import { buildImgUrl } from "@/app/chat/components/files/images/utils";
 import { useAssistants } from "@/components/context/AssistantsContext";
 import { debounce } from "lodash";
 import { LLMProviderView } from "../configuration/llm/interfaces";
@@ -72,7 +72,7 @@ import {
   SearchMultiSelectDropdown,
   Option as DropdownOption,
 } from "@/components/Dropdown";
-import { SourceChip } from "@/app/chat/input/ChatInputBar";
+import { SourceChip } from "@/app/chat/components/input/ChatInputBar";
 import {
   TagIcon,
   UserIcon,
@@ -89,7 +89,7 @@ import { ConfirmEntityModal } from "@/components/modals/ConfirmEntityModal";
 import { FilePickerModal } from "@/app/chat/my-documents/components/FilePicker";
 import { useDocumentsContext } from "@/app/chat/my-documents/DocumentsContext";
 
-import { SEARCH_TOOL_ID } from "@/app/chat/tools/constants";
+import { SEARCH_TOOL_ID } from "@/app/chat/components/tools/constants";
 import TextView from "@/components/chat/TextView";
 import { MinimalOnyxDocument } from "@/lib/search/interfaces";
 import { MAX_CHARACTERS_PERSONA_DESCRIPTION } from "@/lib/constants";
