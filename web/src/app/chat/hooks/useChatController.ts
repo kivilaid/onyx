@@ -16,7 +16,14 @@ import {
 
 import { AnswerPiecePacket } from "@/lib/search/interfaces";
 
-import { Dispatch, SetStateAction, useEffect, useRef, useState } from "react";
+import {
+  Dispatch,
+  SetStateAction,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   getLastSuccessfulMessageId,
   getLatestMessageChain,
@@ -96,38 +103,62 @@ interface UseChatControllerProps {
   llmManager: LlmManager;
   liveAssistant: Persona;
   availableAssistants: Persona[];
-  defaultAssistantId: number | undefined;
   existingChatSessionId: string | null;
   firstMessage?: string;
   selectedDocuments: OnyxDocument[];
   searchParams: ReadonlyURLSearchParams;
   setPopup: (popup: PopupSpec) => void;
-  clientScrollToBottom: () => void;
+
+  // scroll/focus related stuff
+  clientScrollToBottom: (fast?: boolean) => void;
+  scrollInitialized: React.MutableRefObject<boolean>;
+  hasPerformedInitialScroll: boolean;
+  setHasPerformedInitialScroll: React.Dispatch<React.SetStateAction<boolean>>;
+  isInitialLoad: React.MutableRefObject<boolean>;
+  textAreaRef: React.RefObject<HTMLTextAreaElement>;
+
   resetInputBar: () => void;
+  setSelectedAssistantFromId: (assistantId: number | null) => void;
   setSelectedMessageForDocDisplay: (messageId: number | null) => void;
+  setSelectedDocuments: (documents: OnyxDocument[]) => void;
 }
 
 export function useChatController({
   filterManager,
   llmManager,
   availableAssistants,
-  defaultAssistantId,
   liveAssistant,
   existingChatSessionId,
   firstMessage,
   selectedDocuments,
+
+  // scroll/focus related stuff
   clientScrollToBottom,
+  scrollInitialized,
+  hasPerformedInitialScroll,
+  setHasPerformedInitialScroll,
+  isInitialLoad,
+  textAreaRef,
+
   setPopup,
   resetInputBar,
+  setSelectedAssistantFromId,
   setSelectedMessageForDocDisplay,
+  setSelectedDocuments,
 }: UseChatControllerProps) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { refreshChatSessions, chatSessions, llmProviders } = useChatContext();
+  const { refreshChatSessions, llmProviders } = useChatContext();
 
-  const { addSelectedFile, uploadFile, setCurrentMessageFiles } =
-    useDocumentsContext();
+  const {
+    selectedFiles,
+    selectedFolders,
+    addSelectedFile,
+    uploadFile,
+    setCurrentMessageFiles,
+    clearSelectedItems,
+  } = useDocumentsContext();
 
   const chatSessionIdRef = useRef<string | null>(existingChatSessionId);
   // Only updates on session load (ie. rename / switching chat session)
@@ -145,6 +176,14 @@ export function useChatController({
 
   const [isReady, setIsReady] = useState(false);
 
+  // just choose a conservative default, this will be updated in the
+  // background on initial load / on persona change
+  const [maxTokens, setMaxTokens] = useState<number>(4096);
+
+  // fetch messages for the chat session
+  const [isFetchingChatMessages, setIsFetchingChatMessages] = useState(
+    existingChatSessionId !== null
+  );
   const [submittedMessage, setSubmittedMessage] = useState(firstMessage || "");
 
   const [canContinue, setCanContinue] = useState<Map<string | null, boolean>>(
@@ -155,37 +194,6 @@ export function useChatController({
 
   const [uncaughtError, setUncaughtError] = useState<string | null>(null);
   const [loadingError, setLoadingError] = useState<string | null>(null);
-
-  const selectedChatSession = chatSessions.find(
-    (chatSession) => chatSession.id === existingChatSessionId
-  );
-
-  const existingChatSessionAssistantId = selectedChatSession?.persona_id;
-  const [selectedAssistant, setSelectedAssistant] = useState<
-    Persona | undefined
-  >(
-    // NOTE: look through available assistants here, so that even if the user
-    // has hidden this assistant it still shows the correct assistant when
-    // going back to an old chat session
-    existingChatSessionAssistantId !== undefined
-      ? availableAssistants.find(
-          (assistant) => assistant.id === existingChatSessionAssistantId
-        )
-      : defaultAssistantId !== undefined
-        ? availableAssistants.find(
-            (assistant) => assistant.id === defaultAssistantId
-          )
-        : undefined
-  );
-
-  const setSelectedAssistantFromId = (assistantId: number) => {
-    // NOTE: also intentionally look through available assistants here, so that
-    // even if the user has hidden an assistant they can still go back to it
-    // for old chats
-    setSelectedAssistant(
-      availableAssistants.find((assistant) => assistant.id === assistantId)
-    );
-  };
 
   const [completeMessageDetail, setCompleteMessageDetail] = useState<
     Map<string | null, MessageTreeState>
@@ -305,6 +313,7 @@ export function useChatController({
       messageDetail.get(chatSessionIdRef.current) || new Map<number, Message>()
     );
   };
+
   const currentSessionId = (): string => {
     return chatSessionIdRef.current!;
   };
@@ -371,14 +380,6 @@ export function useChatController({
     return chatState.get(currentSessionId()) || "input";
   };
 
-  const currentChatAnswering = () => {
-    return (
-      currentChatState() == "toolBuilding" ||
-      currentChatState() == "streaming" ||
-      currentChatState() == "loading"
-    );
-  };
-
   const stopGenerating = () => {
     const currentSession = currentSessionId();
     const controller = abortControllers.get(currentSession);
@@ -391,9 +392,6 @@ export function useChatController({
       });
     }
 
-    const messageHistory = getLatestMessageChain(
-      currentMessageMap(completeMessageDetail)
-    );
     const lastMessage = messageHistory[messageHistory.length - 1];
     if (
       lastMessage &&
@@ -965,7 +963,7 @@ export function useChatController({
                 updateChatState("input");
                 setAgenticGenerating(false);
                 // setAlternativeGeneratingAssistant(null);
-                // setSubmittedMessage("");
+                setSubmittedMessage("");
 
                 throw new Error((packet as StreamingError).error);
               } else {
@@ -1179,9 +1177,9 @@ export function useChatController({
     updateChatState("input", chatSessionIdRef.current);
   };
 
-  const messageHistory = getLatestMessageChain(
-    currentMessageMap(completeMessageDetail)
-  );
+  const messageHistory = useMemo(() => {
+    return getLatestMessageChain(currentMessageMap(completeMessageDetail));
+  }, [completeMessageDetail]);
 
   const onMessageSelection = (messageId: number) => {
     setSelectedMessageForDocDisplay(messageId);
@@ -1196,19 +1194,42 @@ export function useChatController({
     patchMessageToBeLatest(messageId);
   };
 
+  // fetch chat messages for the chat session
   useEffect(() => {
     const priorChatSessionId = chatSessionIdRef.current;
     const loadedSessionId = loadedIdSessionRef.current;
     chatSessionIdRef.current = existingChatSessionId;
     loadedIdSessionRef.current = existingChatSessionId;
 
+    textAreaRef.current?.focus();
+
+    // only clear things if we're going from one chat session to another
+    const isChatSessionSwitch = existingChatSessionId !== priorChatSessionId;
+    if (isChatSessionSwitch) {
+      // de-select documents
+
+      // reset all filters
+      filterManager.setSelectedDocumentSets([]);
+      filterManager.setSelectedSources([]);
+      filterManager.setSelectedTags([]);
+      filterManager.setTimeRange(null);
+
+      // remove uploaded files
+      setCurrentMessageFiles([]);
+
+      // if switching from one chat to another, then need to scroll again
+      // if we're creating a brand new chat, then don't need to scroll
+      if (priorChatSessionId !== null) {
+        setSelectedDocuments([]);
+        clearSelectedItems();
+        setHasPerformedInitialScroll(false);
+      }
+    }
+
     async function initialSessionFetch() {
       if (existingChatSessionId === null) {
-        if (defaultAssistantId !== undefined) {
-          setSelectedAssistantFromId(defaultAssistantId);
-        } else {
-          setSelectedAssistant(undefined);
-        }
+        // reset the selected assistant back to default
+        setSelectedAssistantFromId(null);
         updateCompleteMessageDetail(null, new Map());
         setChatSessionSharedStatus(ChatSessionSharedStatus.Private);
 
@@ -1244,11 +1265,14 @@ export function useChatController({
       // last message is an error and we're on a new chat.
       // This corresponds to a "renaming" of chat, which occurs after first message
       // stream
-      const messageHistory = getLatestMessageChain(newMessageMap);
       if (
-        (messageHistory[messageHistory.length - 1]?.type !== "error" ||
+        (newMessageHistory[newMessageHistory.length - 1]?.type !== "error" ||
           loadedSessionId != null) &&
-        !currentChatAnswering()
+        !(
+          currentChatState() == "toolBuilding" ||
+          currentChatState() == "streaming" ||
+          currentChatState() == "loading"
+        )
       ) {
         const latestMessageId =
           newMessageHistory[newMessageHistory.length - 1]?.messageId;
@@ -1262,7 +1286,26 @@ export function useChatController({
         updateCompleteMessageDetail(chatSession.chat_session_id, newMessageMap);
       }
 
-      // setIsFetchingChatMessages(false);
+      // go to bottom. If initial load, then do a scroll,
+      // otherwise just appear at the bottom
+      scrollInitialized.current = false;
+
+      if (!hasPerformedInitialScroll) {
+        if (isInitialLoad.current) {
+          setHasPerformedInitialScroll(true);
+          isInitialLoad.current = false;
+        }
+        clientScrollToBottom();
+
+        setTimeout(() => {
+          setHasPerformedInitialScroll(true);
+        }, 100);
+      } else if (isChatSessionSwitch) {
+        setHasPerformedInitialScroll(true);
+        clientScrollToBottom(true);
+      }
+
+      setIsFetchingChatMessages(false);
 
       // if this is a seeded chat, then kick off the AI message generation
       if (
@@ -1312,14 +1355,13 @@ export function useChatController({
     };
   }, [pathname]);
 
+  // update chosen assistant if we navigate between pages
   useEffect(() => {
     if (messageHistory.length === 0 && chatSessionIdRef.current === null) {
       // Select from available assistants so shared assistants appear.
-      setSelectedAssistant(
-        availableAssistants.find((persona) => persona.id === defaultAssistantId)
-      );
+      setSelectedAssistantFromId(null);
     }
-  }, [defaultAssistantId, availableAssistants, messageHistory.length]);
+  }, [chatSessionIdRef.current, availableAssistants, messageHistory.length]);
 
   useEffect(() => {
     const handleSlackChatRedirect = async () => {
@@ -1359,26 +1401,100 @@ export function useChatController({
     handleSlackChatRedirect();
   }, [searchParams, router]);
 
+  // fetch # of allowed document tokens for the selected Persona
+  useEffect(() => {
+    async function fetchMaxTokens() {
+      const response = await fetch(
+        `/api/chat/max-selected-document-tokens?persona_id=${liveAssistant?.id}`
+      );
+      if (response.ok) {
+        const maxTokens = (await response.json()).max_tokens as number;
+        setMaxTokens(maxTokens);
+      }
+    }
+    fetchMaxTokens();
+  }, [liveAssistant]);
+
+  // fetch # of document tokens for the selected files
+  useEffect(() => {
+    const calculateTokensAndUpdateSearchMode = async () => {
+      if (selectedFiles.length > 0 || selectedFolders.length > 0) {
+        try {
+          // Prepare the query parameters for the API call
+          const fileIds = selectedFiles.map((file: FileResponse) => file.id);
+          const folderIds = selectedFolders.map(
+            (folder: FolderResponse) => folder.id
+          );
+
+          // Build the query string
+          const queryParams = new URLSearchParams();
+          fileIds.forEach((id) =>
+            queryParams.append("file_ids", id.toString())
+          );
+          folderIds.forEach((id) =>
+            queryParams.append("folder_ids", id.toString())
+          );
+
+          // Make the API call to get token estimate
+          const response = await fetch(
+            `/api/user/file/token-estimate?${queryParams.toString()}`
+          );
+
+          if (!response.ok) {
+            console.error("Failed to fetch token estimate");
+            return;
+          }
+        } catch (error) {
+          console.error("Error calculating tokens:", error);
+        }
+      }
+    };
+
+    calculateTokensAndUpdateSearchMode();
+  }, [selectedFiles, selectedFolders, llmManager.currentLlm]);
+
+  // check if there's an image file in the message history so that we know
+  // which LLMs are available to use
+  const imageFileInMessageHistory = useMemo(() => {
+    return messageHistory
+      .filter((message) => message.type === "user")
+      .some((message) =>
+        message.files.some((file) => file.type === ChatFileType.IMAGE)
+      );
+  }, [messageHistory]);
+
+  useEffect(() => {
+    llmManager.updateImageFilesPresent(imageFileInMessageHistory);
+  }, [imageFileInMessageHistory]);
+
+  // highlight code blocks and set isReady once that's done
   useEffect(() => {
     Prism.highlightAll();
     setIsReady(true);
   }, []);
 
   return {
+    // actions
     onSubmit,
     stopGenerating,
     onMessageSelection,
     handleImageUpload,
+
+    // overall state
     completeMessageDetail,
+    abortControllers,
+    isReady,
+    maxTokens,
+    isFetchingChatMessages,
+
+    // current state
     currentChatState: currentChatState(),
     currentRegenerationState: regenerationState.get(currentSessionId()),
     chatSessionId: currentSessionId(),
     submittedMessage,
-    abortControllers,
     canContinue,
     agenticGenerating,
     uncaughtError,
     loadingError,
-    isReady,
   };
 }

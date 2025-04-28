@@ -57,7 +57,7 @@ import {
   TrashIcon,
 } from "@/components/icons/icons";
 import { buildImgUrl } from "@/app/chat/components/files/images/utils";
-import { useAssistants } from "@/components/context/AssistantsContext";
+import { useAssistantsContext } from "@/components/context/AssistantsContext";
 import { debounce } from "lodash";
 import { LLMProviderView } from "../configuration/llm/interfaces";
 import StarterMessagesList from "./StarterMessageList";
@@ -138,7 +138,8 @@ export function AssistantEditor({
   shouldAddAssistantToUserPreferences?: boolean;
   admin?: boolean;
 }) {
-  const { refreshAssistants, isImageGenerationAvailable } = useAssistants();
+  const { refreshAssistants, isImageGenerationAvailable } =
+    useAssistantsContext();
 
   const router = useRouter();
   const searchParams = useSearchParams();

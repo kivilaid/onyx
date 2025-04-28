@@ -26,7 +26,7 @@ import {
 import { Hoverable } from "@/components/Hoverable";
 import { ChatState } from "@/app/chat/interfaces";
 import UnconfiguredProviderText from "@/components/chat/UnconfiguredProviderText";
-import { useAssistants } from "@/components/context/AssistantsContext";
+import { useAssistantsContext } from "@/components/context/AssistantsContext";
 import { CalendarIcon, TagIcon, XIcon, FolderIcon } from "lucide-react";
 import { FilterPopup } from "@/components/search/filtering/FilterPopup";
 import { DocumentSet, Tag } from "@/lib/types";
@@ -274,7 +274,7 @@ export function ChatInputBar({
     }
   };
 
-  const { finalAssistants: assistantOptions } = useAssistants();
+  const { finalAssistants: assistantOptions } = useAssistantsContext();
 
   const { llmProviders, inputPrompts } = useChatContext();
 

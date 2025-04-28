@@ -58,7 +58,7 @@ import { useUser } from "@/components/user/UserProvider";
 import { ApiKeyModal } from "@/components/llm/ApiKeyModal";
 import BlurBackground from "../../../components/chat/BlurBackground";
 import { NoAssistantModal } from "@/components/modals/NoAssistantModal";
-import { useAssistants } from "@/components/context/AssistantsContext";
+import { useAssistantsContext } from "@/components/context/AssistantsContext";
 import TextView from "@/components/chat/TextView";
 import { Modal } from "@/components/Modal";
 import { useSendMessageToParent } from "@/lib/extension/utils";
@@ -88,6 +88,7 @@ import { useScreenSize } from "@/hooks/useScreenSize";
 import { DocumentResults } from "./documentSidebar/DocumentResults";
 import { getLatestMessageChain } from "../services/messageTree";
 import { useChatController } from "../hooks/useChatController";
+import { useAssistantController } from "../hooks/useAssistantController";
 
 export enum UploadIntent {
   ATTACH_TO_MESSAGE, // For files uploaded via ChatInputBar (paste, drag/drop)
@@ -136,13 +137,6 @@ export function ChatPage({
 
   const { height: screenHeight } = useScreenSize();
 
-  const defaultAssistantIdRaw = searchParams?.get(
-    SEARCH_PARAM_NAMES.PERSONA_ID
-  );
-  const defaultAssistantId = defaultAssistantIdRaw
-    ? parseInt(defaultAssistantIdRaw)
-    : undefined;
-
   // handle redirect if chat page is disabled
   // NOTE: this must be done here, in a client component since
   // settings are passed in via Context and therefore aren't
@@ -164,7 +158,7 @@ export function ChatPage({
   const isInitialLoad = useRef(true);
   const [userSettingsToggled, setUserSettingsToggled] = useState(false);
 
-  const { assistants: availableAssistants, pinnedAssistants } = useAssistants();
+  const { assistants: availableAssistants } = useAssistantsContext();
 
   const [showApiKeyModal, setShowApiKeyModal] = useState(
     !shouldShowWelcomeModal
@@ -223,49 +217,18 @@ export function ChatPage({
     }
   };
 
-  const existingChatSessionAssistantId = selectedChatSession?.persona_id;
-  const [selectedAssistant, setSelectedAssistant] = useState<
-    Persona | undefined
-  >(
-    // NOTE: look through available assistants here, so that even if the user
-    // has hidden this assistant it still shows the correct assistant when
-    // going back to an old chat session
-    existingChatSessionAssistantId !== undefined
-      ? availableAssistants.find(
-          (assistant) => assistant.id === existingChatSessionAssistantId
-        )
-      : defaultAssistantId !== undefined
-        ? availableAssistants.find(
-            (assistant) => assistant.id === defaultAssistantId
-          )
-        : undefined
-  );
-
-  const [alternativeAssistant, setAlternativeAssistant] =
-    useState<Persona | null>(null);
+  const {
+    selectedAssistant,
+    setSelectedAssistantFromId,
+    alternativeAssistant,
+    setAlternativeAssistant,
+    liveAssistant,
+  } = useAssistantController({
+    selectedChatSession,
+  });
 
   const [presentingDocument, setPresentingDocument] =
     useState<MinimalOnyxDocument | null>(null);
-
-  // Current assistant is decided based on this ordering
-  // 1. Alternative assistant (assistant selected explicitly by user)
-  // 2. Selected assistant (assistnat default in this chat session)
-  // 3. First pinned assistants (ordered list of pinned assistants)
-  // 4. Available assistants (ordered list of available assistants)
-  // Relevant test: `live_assistant.spec.ts`
-  const liveAssistant: Persona | undefined = useMemo(
-    () =>
-      alternativeAssistant ||
-      selectedAssistant ||
-      pinnedAssistants[0] ||
-      availableAssistants[0],
-    [
-      alternativeAssistant,
-      selectedAssistant,
-      pinnedAssistants,
-      availableAssistants,
-    ]
-  );
 
   const llmManager = useLlmManager(
     llmProviders,
@@ -295,66 +258,6 @@ export function ChatPage({
     useState<Persona | null>(null);
 
   const { popup, setPopup } = usePopup();
-
-  // fetch messages for the chat session
-  const [isFetchingChatMessages, setIsFetchingChatMessages] = useState(
-    existingChatSessionId !== null
-  );
-
-  useEffect(() => {
-    const priorChatSessionId = chatSessionId;
-
-    textAreaRef.current?.focus();
-
-    // only clear things if we're going from one chat session to another
-    const isChatSessionSwitch = existingChatSessionId !== priorChatSessionId;
-    if (isChatSessionSwitch) {
-      // de-select documents
-
-      // reset all filters
-      filterManager.setSelectedDocumentSets([]);
-      filterManager.setSelectedSources([]);
-      filterManager.setSelectedTags([]);
-      filterManager.setTimeRange(null);
-
-      // remove uploaded files
-      setCurrentMessageFiles([]);
-
-      // if switching from one chat to another, then need to scroll again
-      // if we're creating a brand new chat, then don't need to scroll
-      if (priorChatSessionId !== null) {
-        clearSelectedDocuments();
-        setHasPerformedInitialScroll(false);
-      }
-    }
-
-    async function initialSessionFetch() {
-      // go to bottom. If initial load, then do a scroll,
-      // otherwise just appear at the bottom
-
-      scrollInitialized.current = false;
-
-      if (!hasPerformedInitialScroll) {
-        if (isInitialLoad.current) {
-          setHasPerformedInitialScroll(true);
-          isInitialLoad.current = false;
-        }
-        clientScrollToBottom();
-
-        setTimeout(() => {
-          setHasPerformedInitialScroll(true);
-        }, 100);
-      } else if (isChatSessionSwitch) {
-        setHasPerformedInitialScroll(true);
-        clientScrollToBottom(true);
-      }
-
-      setIsFetchingChatMessages(false);
-    }
-
-    initialSessionFetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [existingChatSessionId, searchParams?.get(SEARCH_PARAM_NAMES.PERSONA_ID)]);
 
   useEffect(() => {
     const userFolderId = searchParams?.get(SEARCH_PARAM_NAMES.USER_FOLDER_ID);
@@ -399,24 +302,6 @@ export function ChatPage({
   const [chatSessionSharedStatus, setChatSessionSharedStatus] =
     useState<ChatSessionSharedStatus>(ChatSessionSharedStatus.Private);
 
-  // just choose a conservative default, this will be updated in the
-  // background on initial load / on persona change
-  const [maxTokens, setMaxTokens] = useState<number>(4096);
-
-  // fetch # of allowed document tokens for the selected Persona
-  useEffect(() => {
-    async function fetchMaxTokens() {
-      const response = await fetch(
-        `/api/chat/max-selected-document-tokens?persona_id=${liveAssistant?.id}`
-      );
-      if (response.ok) {
-        const maxTokens = (await response.json()).max_tokens as number;
-        setMaxTokens(maxTokens);
-      }
-    }
-    fetchMaxTokens();
-  }, [liveAssistant]);
-
   const filterManager = useFilters();
   const [isChatSearchModalOpen, setIsChatSearchModalOpen] = useState(false);
 
@@ -434,6 +319,8 @@ export function ChatPage({
   const inputRef = useRef<HTMLDivElement>(null);
   const endDivRef = useRef<HTMLDivElement>(null);
   const endPaddingRef = useRef<HTMLDivElement>(null);
+
+  const scrollInitialized = useRef(false);
 
   const previousHeight = useRef<number>(
     inputRef.current?.getBoundingClientRect().height!
@@ -485,6 +372,7 @@ export function ChatPage({
   };
 
   const clientScrollToBottom = (fast?: boolean) => {
+    console.log("clientScrollToBottom");
     waitForScrollRef.current = true;
 
     setTimeout(() => {
@@ -591,7 +479,6 @@ export function ChatPage({
   const [selectedDocuments, setSelectedDocuments] = useState<OnyxDocument[]>(
     []
   );
-  const [selectedDocumentTokens, setSelectedDocumentTokens] = useState(0);
 
   const {
     onSubmit,
@@ -609,11 +496,12 @@ export function ChatPage({
     uncaughtError,
     loadingError,
     isReady,
+    maxTokens,
+    isFetchingChatMessages,
   } = useChatController({
     filterManager,
     llmManager,
     availableAssistants,
-    defaultAssistantId,
     liveAssistant,
     existingChatSessionId,
     firstMessage,
@@ -622,7 +510,14 @@ export function ChatPage({
     setPopup,
     clientScrollToBottom,
     resetInputBar,
+    setSelectedAssistantFromId,
     setSelectedMessageForDocDisplay,
+    setSelectedDocuments,
+    scrollInitialized,
+    hasPerformedInitialScroll,
+    setHasPerformedInitialScroll,
+    isInitialLoad,
+    textAreaRef,
   });
 
   const messageHistory = useMemo(() => {
@@ -630,14 +525,6 @@ export function ChatPage({
       completeMessageDetail.get(chatSessionId) || new Map()
     );
   }, [completeMessageDetail]);
-
-  const imageFileInMessageHistory = useMemo(() => {
-    return messageHistory
-      .filter((message) => message.type === "user")
-      .some((message) =>
-        message.files.some((file) => file.type === ChatFileType.IMAGE)
-      );
-  }, [messageHistory]);
 
   const autoScrollEnabled =
     (user?.preferences?.auto_scroll && !agenticGenerating) ?? false;
@@ -826,9 +713,6 @@ export function ChatPage({
     isAnonymousUser: user?.is_anonymous_user,
   });
 
-  // Virtualization + Scrolling related effects and functions
-  const scrollInitialized = useRef(false);
-
   useSendMessageToParent();
 
   useEffect(() => {
@@ -877,15 +761,6 @@ export function ChatPage({
   }, [retrievalEnabled]);
 
   useEffect(() => {
-    if (messageHistory.length === 0 && chatSessionId === null) {
-      // Select from available assistants so shared assistants appear.
-      setSelectedAssistant(
-        availableAssistants.find((persona) => persona.id === defaultAssistantId)
-      );
-    }
-  }, [defaultAssistantId, availableAssistants, messageHistory.length]);
-
-  useEffect(() => {
     if (
       submittedMessage &&
       currentChatState === "loading" &&
@@ -915,47 +790,6 @@ export function ChatPage({
     scrollDist.current = scrollDistance;
     setAboveHorizon(scrollDist.current > HORIZON_DISTANCE);
   }, []);
-
-  useEffect(() => {
-    llmManager.updateImageFilesPresent(imageFileInMessageHistory);
-  }, [imageFileInMessageHistory]);
-
-  useEffect(() => {
-    const calculateTokensAndUpdateSearchMode = async () => {
-      if (selectedFiles.length > 0 || selectedFolders.length > 0) {
-        try {
-          // Prepare the query parameters for the API call
-          const fileIds = selectedFiles.map((file: FileResponse) => file.id);
-          const folderIds = selectedFolders.map(
-            (folder: FolderResponse) => folder.id
-          );
-
-          // Build the query string
-          const queryParams = new URLSearchParams();
-          fileIds.forEach((id) =>
-            queryParams.append("file_ids", id.toString())
-          );
-          folderIds.forEach((id) =>
-            queryParams.append("folder_ids", id.toString())
-          );
-
-          // Make the API call to get token estimate
-          const response = await fetch(
-            `/api/user/file/token-estimate?${queryParams.toString()}`
-          );
-
-          if (!response.ok) {
-            console.error("Failed to fetch token estimate");
-            return;
-          }
-        } catch (error) {
-          console.error("Error calculating tokens:", error);
-        }
-      }
-    };
-
-    calculateTokensAndUpdateSearchMode();
-  }, [selectedFiles, selectedFolders, llmManager.currentLlm]);
 
   useSidebarShortcut(router, toggleSidebar);
 
@@ -1007,7 +841,7 @@ export function ChatPage({
   }
 
   function createRegenerator(regenerationRequest: RegenerationRequest) {
-    // Returns new function that only needs `modelOverRide` to be specified when called
+    // Returns new function that only needs `modelOveride` to be specified when called
     return async function (modelOverride: LlmDescriptor) {
       return await onSubmit({
         message: message,
@@ -1036,7 +870,6 @@ export function ChatPage({
 
   const clearSelectedDocuments = () => {
     setSelectedDocuments([]);
-    setSelectedDocumentTokens(0);
     clearSelectedItems();
   };
 
@@ -1145,7 +978,8 @@ export function ChatPage({
               selectedDocuments={selectedDocuments}
               toggleDocumentSelection={toggleDocumentSelection}
               clearSelectedDocuments={clearSelectedDocuments}
-              selectedDocumentTokens={selectedDocumentTokens}
+              // TODO (chris): fix
+              selectedDocumentTokens={0}
               maxTokens={maxTokens}
               initialWidth={400}
               isOpen={true}
@@ -1309,7 +1143,8 @@ export function ChatPage({
               selectedDocuments={selectedDocuments}
               toggleDocumentSelection={toggleDocumentSelection}
               clearSelectedDocuments={clearSelectedDocuments}
-              selectedDocumentTokens={selectedDocumentTokens}
+              // TODO (chris): fix
+              selectedDocumentTokens={0}
               maxTokens={maxTokens}
               initialWidth={400}
               isOpen={documentSidebarVisible && !settings?.isMobile}
@@ -1412,7 +1247,7 @@ export function ChatPage({
                             currentChatState == "input" &&
                             !loadingError &&
                             !submittedMessage && (
-                              <div className="h-full  w-[95%] mx-auto flex flex-col justify-center items-center">
+                              <div className="h-full w-[95%] mx-auto flex flex-col justify-center items-center">
                                 <ChatIntro selectedPersona={liveAssistant} />
 
                                 <StarterMessages
@@ -1420,9 +1255,9 @@ export function ChatPage({
                                   onSubmit={(messageOverride) =>
                                     onSubmit({
                                       message: messageOverride,
-                                      selectedFiles: [],
-                                      selectedFolders: [],
-                                      currentMessageFiles: [],
+                                      selectedFiles: selectedFiles,
+                                      selectedFolders: selectedFolders,
+                                      currentMessageFiles: currentMessageFiles,
                                       useLanggraph: proSearchEnabled,
                                     })
                                   }
@@ -1493,18 +1328,6 @@ export function ChatPage({
                                       files={message.files}
                                       messageId={message.messageId}
                                       onEdit={(editedContent) => {
-                                        // const parentMessageId =
-                                        //   message.parentMessageId!;
-                                        // const parentMessage =
-                                        //   messageMap?.get(parentMessageId)!;
-                                        // upsertToCompleteMessageMap({
-                                        //   messages: [
-                                        //     {
-                                        //       ...parentMessage,
-                                        //       latestChildMessageId: null,
-                                        //     },
-                                        //   ],
-                                        // });
                                         onSubmit({
                                           message: editedContent,
                                           messageIdToResend:

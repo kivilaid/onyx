@@ -19,7 +19,7 @@ import { getFinalLLM } from "@/lib/llm/utils";
 import React, { useEffect, useState } from "react";
 import { updateUserAssistantList } from "@/lib/assistants/updateAssistantPreferences";
 import { DraggableAssistantCard } from "@/components/assistants/AssistantCards";
-import { useAssistants } from "@/components/context/AssistantsContext";
+import { useAssistantsContext } from "@/components/context/AssistantsContext";
 import { useUser } from "@/components/user/UserProvider";
 
 export function AssistantsTab({
@@ -33,7 +33,7 @@ export function AssistantsTab({
 }) {
   const { refreshUser } = useUser();
   const [_, llmName] = getFinalLLM(llmProviders, null, null);
-  const { finalAssistants, refreshAssistants } = useAssistants();
+  const { finalAssistants, refreshAssistants } = useAssistantsContext();
   const [assistants, setAssistants] = useState(finalAssistants);
 
   useEffect(() => {
