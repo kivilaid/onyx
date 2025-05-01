@@ -87,6 +87,7 @@ import {
 } from "../my-documents/DocumentsContext";
 import { useChatContext } from "@/components/context/ChatContext";
 import Prism from "prismjs";
+import { UploadIntent } from "../components/ChatPage";
 
 const TEMP_USER_MESSAGE_ID = -1;
 const TEMP_ASSISTANT_MESSAGE_ID = -2;
@@ -1135,7 +1136,10 @@ export function useChatController({
     // setSubmittedMessage("");
   };
 
-  const handleImageUpload = async (acceptedFiles: File[]) => {
+  const handleImageUpload = async (
+    acceptedFiles: File[],
+    intent: UploadIntent
+  ) => {
     const [_, llmModel] = getFinalLLM(
       llmProviders,
       liveAssistant,
@@ -1156,16 +1160,34 @@ export function useChatController({
       return;
     }
 
-    updateChatState("uploading", chatSessionIdRef.current);
+    updateChatState("uploading", currentSessionId());
 
     for (let file of acceptedFiles) {
       const formData = new FormData();
       formData.append("files", file);
-      const response = await uploadFile(formData, null);
+      const response: FileResponse[] = await uploadFile(formData, null);
 
       if (response.length > 0) {
         const uploadedFile = response[0];
-        addSelectedFile(uploadedFile);
+
+        if (intent == UploadIntent.ADD_TO_DOCUMENTS) {
+          addSelectedFile(uploadedFile);
+        } else {
+          const newFileDescriptor: FileDescriptor = {
+            // Use file_id (storage ID) if available, otherwise fallback to DB id
+            // Ensure it's a string as FileDescriptor expects
+            id: uploadedFile.file_id
+              ? String(uploadedFile.file_id)
+              : String(uploadedFile.id),
+            type: uploadedFile.chat_file_type
+              ? uploadedFile.chat_file_type
+              : ChatFileType.PLAIN_TEXT,
+            name: uploadedFile.name,
+            isUploading: false, // Mark as successfully uploaded
+          };
+
+          setCurrentMessageFiles((prev) => [...prev, newFileDescriptor]);
+        }
       } else {
         setPopup({
           type: "error",
@@ -1174,7 +1196,7 @@ export function useChatController({
       }
     }
 
-    updateChatState("input", chatSessionIdRef.current);
+    updateChatState("input", currentSessionId());
   };
 
   const messageHistory = useMemo(() => {
