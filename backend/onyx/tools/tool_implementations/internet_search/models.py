@@ -3,8 +3,12 @@ from pydantic import BaseModel
 
 class InternetSearchResult(BaseModel):
     title: str
-    link: str
-    snippet: str
+    url: str
+    published_date: str
+    author: str | None
+    score: float | None
+    full_content: str
+    summary: str
 
 
 class InternetSearchResponse(BaseModel):

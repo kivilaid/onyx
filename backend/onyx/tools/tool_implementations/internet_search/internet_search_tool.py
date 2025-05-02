@@ -66,17 +66,18 @@ Follow Up Input:
 """.strip()
 
 
-def llm_doc_from_internet_search_result(result: InternetSearchResult) -> LlmDoc:
+# TODO: Should/can author be stored?
+def internet_search_result_to_llm_doc(result: InternetSearchResult) -> LlmDoc:
     return LlmDoc(
-        document_id=result.link,
-        content=result.snippet,
-        blurb=result.snippet,
-        semantic_identifier=result.link,
-        source_type=DocumentSource.WEB,
+        document_id=result.url,
+        content=result.full_content,
+        blurb=result.summary,
+        semantic_identifier=result.title,
+        source_type=DocumentSource.NOT_APPLICABLE,
         metadata={},
-        updated_at=datetime.now(),
-        link=result.link,
-        source_links={0: result.link},
+        updated_at=result.published_date,
+        link=result.url,
+        source_links={0: result.url},
         match_highlights=[],
     )
 
@@ -86,18 +87,18 @@ def internet_search_response_to_search_docs(
 ) -> list[SearchDoc]:
     return [
         SearchDoc(
-            document_id=doc.link,
+            document_id=doc.url,
             chunk_ind=-1,
             semantic_identifier=doc.title,
-            link=doc.link,
-            blurb=doc.snippet,
+            link=doc.url,
+            blurb=doc.summary,
             source_type=DocumentSource.NOT_APPLICABLE,
             boost=0,
             hidden=False,
             metadata={},
-            score=None,
+            score=doc.score,
             match_highlights=[],
-            updated_at=None,
+            updated_at=doc.published_date,
             primary_owners=[],
             secondary_owners=[],
             is_internet=True,
@@ -123,13 +124,12 @@ class InternetSearchTool(Tool[None]):
         self.answer_style_config = answer_style_config
         self.prompt_config = prompt_config
 
-        self.host = "https://api.bing.microsoft.com/v7.0"
+        self.host = "https://api.exa.ai"
         self.headers = {
-            "Ocp-Apim-Subscription-Key": api_key,
+            "x-api-key": api_key,
             "Content-Type": "application/json",
         }
         self.num_results = num_results
-        self.client = httpx.Client()
 
     @property
     def name(self) -> str:
@@ -211,37 +211,71 @@ class InternetSearchTool(Tool[None]):
         self, *args: ToolResponse
     ) -> str | list[str | dict[str, Any]]:
         search_response = cast(InternetSearchResponse, args[0].response)
-        return json.dumps(search_response.model_dump())
+        return json.dumps(search_response.model_dump(), default=str)
 
     def _perform_search(self, query: str) -> InternetSearchResponse:
-        response = self.client.get(
-            f"{self.host}/search",
-            headers=self.headers,
-            params={"q": query, "count": self.num_results},
-        )
+        with httpx.Client(timeout=20.0) as client:  # Exa search api takes ~10-15s
+            response = client.post(
+                f"{self.host}/search",
+                headers=self.headers,
+                data=json.dumps(
+                    {
+                        "query": query,
+                        "type": "auto",
+                        "numResults": self.num_results,
+                        "contents": {
+                            "text": True,
+                            "livecrawl": "always",
+                            "summary": True,
+                        },
+                    }
+                ),
+            )
 
-        response.raise_for_status()
+            response.raise_for_status()
 
-        results = response.json()
+            results = response.json()
 
-        # If no hits, Bing does not include the webPages key
-        search_results = (
-            results["webPages"]["value"][: self.num_results]
-            if "webPages" in results
-            else []
-        )
+            # Exa always returns results (questionable)
+            search_results = results["results"]
 
-        return InternetSearchResponse(
-            revised_query=query,
-            internet_results=[
-                InternetSearchResult(
-                    title=result["name"],
-                    link=result["url"],
-                    snippet=result["snippet"],
-                )
-                for result in search_results
-            ],
-        )
+            internet_results = []
+            for result in search_results:
+                try:
+                    # Check required fields first
+                    required_fields = ["title", "url", "text", "summary"]
+                    missing_fields = [
+                        field for field in required_fields if field not in result
+                    ]
+                    if missing_fields:
+                        logger.warning(
+                            f"Missing required fields in search result: {missing_fields}"
+                        )
+                        continue
+
+                    internet_results.append(
+                        InternetSearchResult(
+                            title=result["title"],
+                            url=result["url"],
+                            published_date=(
+                                result.get("publishedDate")
+                                if result.get("publishedDate")
+                                else datetime.now().isoformat()
+                            ),
+                            author=result.get("author"),
+                            score=result.get("score"),
+                            full_content=result["text"],
+                            summary=result["summary"],
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing search result: {e}")
+                    continue
+
+            return InternetSearchResponse(
+                revised_query=query,
+                internet_results=internet_results,
+            )
 
     def run(
         self, override_kwargs: None = None, **kwargs: str
@@ -255,7 +289,7 @@ class InternetSearchTool(Tool[None]):
         )
 
         llm_docs = [
-            llm_doc_from_internet_search_result(result)
+            internet_search_result_to_llm_doc(result)
             for result in results.internet_results
         ]
 
