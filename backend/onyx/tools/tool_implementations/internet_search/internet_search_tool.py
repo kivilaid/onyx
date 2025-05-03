@@ -5,15 +5,26 @@ from typing import Any
 from typing import cast
 
 import httpx
+from sqlalchemy.orm import Session
 
 from onyx.chat.chat_utils import combine_message_chain
 from onyx.chat.models import AnswerStyleConfig
-from onyx.chat.models import LlmDoc
+from onyx.chat.models import DocumentPruningConfig
 from onyx.chat.models import PromptConfig
 from onyx.chat.prompt_builder.answer_prompt_builder import AnswerPromptBuilder
+from onyx.chat.prompt_builder.citations_prompt import compute_max_llm_input_tokens
 from onyx.configs.constants import DocumentSource
 from onyx.configs.model_configs import GEN_AI_HISTORY_CUTOFF
-from onyx.context.search.models import SearchDoc
+from onyx.configs.model_configs import GEN_AI_MODEL_FALLBACK_MAX_TOKENS
+from onyx.connectors.models import Document
+from onyx.connectors.models import TextSection
+from onyx.db.search_settings import get_current_search_settings
+from onyx.indexing.chunker import Chunker
+from onyx.indexing.embedder import DefaultIndexingEmbedder
+from onyx.indexing.embedder import embed_chunks_with_failure_handling
+from onyx.indexing.indexing_pipeline import process_image_sections
+from onyx.indexing.models import DocAwareChunk
+from onyx.indexing.models import IndexChunk
 from onyx.llm.interfaces import LLM
 from onyx.llm.models import PreviousMessage
 from onyx.llm.utils import message_to_string
@@ -26,8 +37,9 @@ from onyx.tools.tool import Tool
 from onyx.tools.tool_implementations.internet_search.models import (
     InternetSearchResponse,
 )
-from onyx.tools.tool_implementations.internet_search.models import (
-    InternetSearchResult,
+from onyx.tools.tool_implementations.internet_search.models import InternetSearchResult
+from onyx.tools.tool_implementations.internet_search.utils import (
+    internet_search_chunk_to_llm_doc,
 )
 from onyx.tools.tool_implementations.search_like_tool_utils import (
     build_next_prompt_for_search_like_tool,
@@ -37,6 +49,7 @@ from onyx.tools.tool_implementations.search_like_tool_utils import (
 )
 from onyx.utils.logger import setup_logger
 from onyx.utils.special_types import JSON_ro
+from shared_configs.enums import EmbedTextType
 
 logger = setup_logger()
 
@@ -66,61 +79,27 @@ Follow Up Input:
 """.strip()
 
 
-# TODO: Should/can author be stored?
-def internet_search_result_to_llm_doc(result: InternetSearchResult) -> LlmDoc:
-    return LlmDoc(
-        document_id=result.url,
-        content=result.full_content,
-        blurb=result.summary,
-        semantic_identifier=result.title,
-        source_type=DocumentSource.NOT_APPLICABLE,
-        metadata={},
-        updated_at=result.published_date,
-        link=result.url,
-        source_links={0: result.url},
-        match_highlights=[],
-    )
-
-
-def internet_search_response_to_search_docs(
-    internet_search_response: InternetSearchResponse,
-) -> list[SearchDoc]:
-    return [
-        SearchDoc(
-            document_id=doc.url,
-            chunk_ind=-1,
-            semantic_identifier=doc.title,
-            link=doc.url,
-            blurb=doc.summary,
-            source_type=DocumentSource.NOT_APPLICABLE,
-            boost=0,
-            hidden=False,
-            metadata={},
-            score=doc.score,
-            match_highlights=[],
-            updated_at=doc.published_date,
-            primary_owners=[],
-            secondary_owners=[],
-            is_internet=True,
-        )
-        for doc in internet_search_response.internet_results
-    ]
-
-
 # override_kwargs is not supported for internet search tools
 class InternetSearchTool(Tool[None]):
     _NAME = "run_internet_search"
     _DISPLAY_NAME = "Internet Search"
     _DESCRIPTION = "Perform an internet search for up-to-date information."
 
+    # TODO: Tool constructor sets answerstyle to all sources relevant, but that is not true for internet search
     def __init__(
         self,
+        db_session: Session,
+        llm: LLM,
         api_key: str,
+        pruning_config: DocumentPruningConfig,
         answer_style_config: AnswerStyleConfig,
         prompt_config: PromptConfig,
         num_results: int = 10,
     ) -> None:
+        self.db_session = db_session
+        self.llm = llm
         self.api_key = api_key
+        self.pruning_config = pruning_config
         self.answer_style_config = answer_style_config
         self.prompt_config = prompt_config
 
@@ -130,6 +109,15 @@ class InternetSearchTool(Tool[None]):
             "Content-Type": "application/json",
         }
         self.num_results = num_results
+
+        max_input_tokens = compute_max_llm_input_tokens(
+            llm_config=llm.config,
+        )
+        if max_input_tokens < 3 * GEN_AI_MODEL_FALLBACK_MAX_TOKENS:
+            self.chunks_above = 0
+            self.chunks_below = 0
+
+        self.chunks_above + self.chunks_below + 1
 
     @property
     def name(self) -> str:
@@ -161,6 +149,8 @@ class InternetSearchTool(Tool[None]):
                 },
             },
         }
+
+    """For LLMs that don't support tool calling"""
 
     def check_if_needs_internet_search(
         self,
@@ -227,6 +217,11 @@ class InternetSearchTool(Tool[None]):
                             "text": True,
                             "livecrawl": "always",
                             "summary": True,
+                            "highlights": {
+                                "numSentences": 5,
+                                "highlightsPerUrl": 1,
+                                "query": "Most relevant to the question: {query}",
+                            },
                         },
                     }
                 ),
@@ -243,7 +238,7 @@ class InternetSearchTool(Tool[None]):
             for result in search_results:
                 try:
                     # Check required fields first
-                    required_fields = ["title", "url", "text", "summary"]
+                    required_fields = ["title", "url", "text", "summary", "highlights"]
                     missing_fields = [
                         field for field in required_fields if field not in result
                     ]
@@ -257,14 +252,13 @@ class InternetSearchTool(Tool[None]):
                         InternetSearchResult(
                             title=result["title"],
                             url=result["url"],
-                            published_date=(
-                                result.get("publishedDate")
-                                if result.get("publishedDate")
-                                else datetime.now().isoformat()
+                            published_date=result.get(
+                                "publishedDate", datetime.now().isoformat()
                             ),
                             author=result.get("author"),
                             score=result.get("score"),
                             full_content=result["text"],
+                            relevant_content="\n".join(result["highlights"]),
                             summary=result["summary"],
                         )
                     )
@@ -277,25 +271,111 @@ class InternetSearchTool(Tool[None]):
                 internet_results=internet_results,
             )
 
+    def embed_internet_search_results(
+        self, results: InternetSearchResponse, embedder: DefaultIndexingEmbedder
+    ) -> list[DocAwareChunk]:
+        documents: list[Document] = []
+        for result in results.internet_results:
+            # Create a document from the search result
+            doc = Document(
+                id=result.url,
+                sections=[TextSection(link=result.url, text=result.full_content)],
+                source=DocumentSource.NOT_APPLICABLE,
+                semantic_identifier=result.title,
+                metadata={
+                    "url": result.url,
+                    "published_date": result.published_date,
+                    "author": result.author or "Unknown",
+                    "score": str(result.score) if result.score else "N/A",
+                },
+                doc_updated_at=(
+                    datetime.fromisoformat(result.published_date)
+                    if result.published_date
+                    else None
+                ),
+                title=result.title,
+            )
+
+            documents.append(doc)
+
+        indexing_documents = process_image_sections(documents)
+
+        chunker = Chunker(
+            tokenizer=embedder.embedding_model.tokenizer,
+            enable_multipass=False,
+            enable_contextual_rag=False,
+        )
+        chunks = chunker.chunk(indexing_documents)
+
+        chunks_with_embeddings, _ = (
+            embed_chunks_with_failure_handling(
+                chunks=chunks,
+                embedder=embedder,
+            )
+            if chunks
+            else ([], [])
+        )
+
+        return chunks_with_embeddings
+
+    def vector_similarity_sort(
+        self, query: list[float], chunks: list[IndexChunk]
+    ) -> list[IndexChunk]:
+        def cosine_similarity(a: list[float], b: list[float]) -> float:
+            dot_product = sum(x * y for x, y in zip(a, b))
+            norm_a = sum(x * x for x in a) ** 0.5
+            norm_b = sum(x * x for x in b) ** 0.5
+            if norm_a == 0 or norm_b == 0:
+                return 0.0
+            return dot_product / (norm_a * norm_b)
+
+        # Calculate similarity scores for each chunk
+        scored_chunks = []
+        for chunk in chunks:
+            # Use the full embedding for similarity calculation
+            similarity = cosine_similarity(query, chunk.embeddings.full_embedding)
+            scored_chunks.append((similarity, chunk))
+
+        # Sort chunks by similarity score in descending order
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
+
+        # Return just the chunks in order of similarity
+        return [chunk for _, chunk in scored_chunks]
+
     def run(
         self, override_kwargs: None = None, **kwargs: str
     ) -> Generator[ToolResponse, None, None]:
-        query = cast(str, kwargs["internet_search_query"])
-
+        query = kwargs["internet_search_query"]
         results = self._perform_search(query)
-        yield ToolResponse(
-            id=INTERNET_SEARCH_RESPONSE_ID,
-            response=results,
+
+        # Yield initial search response
+        yield ToolResponse(id=INTERNET_SEARCH_RESPONSE_ID, response=results)
+
+        search_settings = get_current_search_settings(self.db_session)
+        embedder = DefaultIndexingEmbedder.from_db_search_settings(
+            search_settings=search_settings
+        )
+        query_embedding = embedder.embedding_model.encode(
+            [query], text_type=EmbedTextType.QUERY
+        )[0]
+        embedded_chunks = self.embed_internet_search_results(
+            results,
+            embedder,
         )
 
-        llm_docs = [
-            internet_search_result_to_llm_doc(result)
-            for result in results.internet_results
-        ]
+        sorted_chunks = self.vector_similarity_sort(query_embedding, embedded_chunks)
+        pruned_llm_docs = []
+        token_count = 0
+        for chunk in sorted_chunks:
+            chunk_token_count = len(chunk.embeddings.full_embedding)
+            if token_count + chunk_token_count > self.pruning_config.max_tokens:
+                break
+            token_count += chunk_token_count
+            pruned_llm_docs.append(internet_search_chunk_to_llm_doc(chunk))
 
         yield ToolResponse(
             id=FINAL_CONTEXT_DOCUMENTS_ID,
-            response=llm_docs,
+            response=pruned_llm_docs,
         )
 
     def final_result(self, *args: ToolResponse) -> JSON_ro:

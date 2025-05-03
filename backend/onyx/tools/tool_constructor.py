@@ -122,6 +122,9 @@ class InternetSearchToolConfig(BaseModel):
             citation_config=CitationConfig(all_docs_useful=True)
         )
     )
+    document_pruning_config: DocumentPruningConfig = Field(
+        default_factory=DocumentPruningConfig
+    )
 
 
 class ImageGenerationToolConfig(BaseModel):
@@ -222,8 +225,11 @@ def construct_tools(
                 tool_dict[db_tool_model.id] = [
                     InternetSearchTool(
                         api_key=EXA_API_KEY,
+                        db_session=db_session,
+                        llm=llm,
                         answer_style_config=internet_search_tool_config.answer_style_config,
                         prompt_config=prompt_config,
+                        pruning_config=internet_search_tool_config.document_pruning_config,
                     )
                 ]
 
